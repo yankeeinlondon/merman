@@ -4291,3 +4291,57 @@ fn gitgraph_edge_fill_partial_ordinals_preserve_best_effort_without_false_eviden
     assert_eq!(evidence.not_applicable_count(), 1);
     assert_eq!(evidence.theme_residual_count(), 0);
 }
+
+fn commit_bullet_xs(svg: &str) -> Vec<f64> {
+    let document = roxmltree::Document::parse(svg).expect("valid GitGraph SVG");
+    document
+        .descendants()
+        .filter(|node| node.has_tag_name("circle") && has_class(node, "commit"))
+        .map(|node| {
+            node.attribute("cx")
+                .and_then(|cx| cx.parse::<f64>().ok())
+                .expect("numeric commit cx")
+        })
+        .collect()
+}
+
+#[test]
+fn gitgraph_commit_spacing_reaches_layout_from_every_config_source() {
+    let source = "gitGraph\n  commit id: \"1\"\n  commit id: \"2\"\n  commit id: \"3\"\n";
+    let theme = DiagramThemeCompiler::new()
+        .compile(DiagramThemeSpec::new())
+        .expect("compile empty GitGraph theme");
+
+    let default = render_gitgraph_with_theme_and_engine(
+        source,
+        &theme,
+        Engine::new(),
+        "git-commit-spacing-default",
+    );
+    assert_eq!(commit_bullet_xs(default.svg()), vec![10.0, 60.0, 110.0]);
+
+    render_source_and_site_config_cases(
+        source,
+        json!({ "gitGraph": { "commitSpacing": 120 } }),
+        &theme,
+        "git-commit-spacing",
+        |owner, rendered| {
+            assert_eq!(
+                commit_bullet_xs(rendered.svg()),
+                vec![10.0, 130.0, 250.0],
+                "{owner}"
+            );
+        },
+    );
+
+    let frontmatter = render_gitgraph_with_theme_and_engine(
+        &format!("---\nconfig:\n  gitGraph:\n    commitSpacing: 120\n---\n{source}"),
+        &theme,
+        Engine::new(),
+        "git-commit-spacing-frontmatter",
+    );
+    assert_eq!(
+        commit_bullet_xs(frontmatter.svg()),
+        vec![10.0, 130.0, 250.0]
+    );
+}

@@ -2211,7 +2211,7 @@ fn sanitize_directive_controlled(
                     .iter()
                     .filter(|(key, value)| {
                         is_suspicious_directive_key(key)
-                            || !crate::generated::is_default_config_key(key)
+                            || !is_directive_config_key(key)
                             || value.is_null()
                     })
                     .map(|(key, _)| key)
@@ -2277,6 +2277,14 @@ fn directive_path_is_css(path: &[DirectiveValuePathSegment]) -> bool {
                 .iter()
                 .any(|css_key| key.contains(css_key))
     )
+}
+
+/// Merman-only config keys that Mermaid's generated default-config shape does not list.
+/// Directives keep them so a diagram can opt into the extension from source.
+const MERMAN_EXTENSION_CONFIG_KEYS: &[&str] = &["commitSpacing"];
+
+fn is_directive_config_key(key: &str) -> bool {
+    crate::generated::is_default_config_key(key) || MERMAN_EXTENSION_CONFIG_KEYS.contains(&key)
 }
 
 fn is_suspicious_directive_key(key: &str) -> bool {
@@ -3550,6 +3558,17 @@ A["<span title="😀">Label</span>"]
             "hsl(120, 50%, 25.5%)"
         );
         assert_eq!(value["themeVariables"]["noteTextColor"], "red-blue");
+    }
+
+    #[test]
+    fn sanitize_directive_keeps_merman_extension_config_keys() {
+        let mut value = json!({
+            "gitGraph": { "commitSpacing": 120, "notAConfigKey": true }
+        });
+
+        sanitize_directive(&mut value);
+
+        assert_eq!(value, json!({ "gitGraph": { "commitSpacing": 120 } }));
     }
 
     #[test]

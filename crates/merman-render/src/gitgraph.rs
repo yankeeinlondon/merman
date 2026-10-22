@@ -39,7 +39,8 @@ pub(crate) fn resolve_gitgraph_title<'a>(
 }
 
 const LAYOUT_OFFSET: f64 = 10.0;
-const COMMIT_STEP: f64 = 40.0;
+/// Mermaid's fixed commit-axis step: `COMMIT_STEP` (40) plus `LAYOUT_OFFSET` (10).
+const DEFAULT_COMMIT_SPACING: f64 = 50.0;
 const DEFAULT_POS: f64 = 30.0;
 const THEME_COLOR_LIMIT: usize = GITGRAPH_PALETTE_SLOT_COUNT;
 pub(crate) const REDUX_BRANCH_LABEL_PADDING_Y: f64 = 12.0;
@@ -608,6 +609,13 @@ pub(crate) fn layout_gitgraph_diagram_typed(
         .max(0.0);
     let parallel_commits =
         cfg_bool(effective_config, &["gitGraph", "parallelCommits"]).unwrap_or(false);
+    // Merman extension (Mermaid has no such key): the distance between consecutive commit
+    // positions on the commit axis. Non-positive values keep Mermaid's fixed step.
+    let commit_spacing = cfg_f64(effective_config, &["gitGraph", "commitSpacing"])
+        .filter(|spacing| *spacing > 0.0)
+        .unwrap_or(DEFAULT_COMMIT_SPACING);
+    // Parent positions already carry `LAYOUT_OFFSET`, so parent-relative steps exclude it.
+    let commit_step = commit_spacing - LAYOUT_OFFSET;
     let use_redux_geometry = cfg_string(effective_config, &["theme"])
         .as_deref()
         .is_some_and(gitgraph_theme_is_redux_geometry);
@@ -673,17 +681,17 @@ pub(crate) fn layout_gitgraph_diagram_typed(
                     && let Some(parent_position) = commit_pos.get(closest_parent)
                 {
                     if mirror_parallel_bt_axis {
-                        cur_pos = parent_position.y + COMMIT_STEP + LAYOUT_OFFSET;
+                        cur_pos = parent_position.y + commit_spacing;
                     } else if direction == "TB" {
-                        cur_pos = parent_position.y + COMMIT_STEP;
+                        cur_pos = parent_position.y + commit_step;
                     } else if direction == "BT" {
                         let current_position = commit_pos
                             .get(commit.id.as_str())
                             .copied()
                             .unwrap_or(CommitPosition { x: 0.0, y: 0.0 });
-                        cur_pos = current_position.y - COMMIT_STEP;
+                        cur_pos = current_position.y - commit_step;
                     } else {
-                        cur_pos = parent_position.x + COMMIT_STEP;
+                        cur_pos = parent_position.x + commit_step;
                     }
                 }
             } else {
@@ -728,7 +736,7 @@ pub(crate) fn layout_gitgraph_diagram_typed(
             y,
         });
 
-        cur_pos += COMMIT_STEP + LAYOUT_OFFSET;
+        cur_pos += commit_spacing;
         max_pos = max_pos.max(cur_pos);
     }
 
@@ -1150,5 +1158,112 @@ mod tests {
         assert_eq!(y_by_id["7-abcdefg"], 70.0);
         assert_eq!(y_by_id["8-abcdefg"], 20.0);
         assert_eq!(layout.max_pos, 210.0);
+    }
+
+    fn linear_commit_model(direction: &str) -> GitGraphRenderModel {
+        GitGraphRenderModel {
+            diagram_type: "gitGraph".to_string(),
+            branches: ["main", "develop"]
+                .into_iter()
+                .map(|name| GitGraphBranchRenderModel {
+                    name: name.to_string(),
+                })
+                .collect(),
+            commits: vec![
+                commit("1", 0, &[], "main"),
+                commit("2", 1, &["1"], "main"),
+                commit("3", 2, &["2"], "develop"),
+                commit("4", 3, &["3"], "develop"),
+            ],
+            current_branch: "main".to_string(),
+            direction: direction.to_string(),
+            title: None,
+            acc_title: None,
+            acc_descr: None,
+            warning_facts: Vec::new(),
+        }
+    }
+
+    fn commit_pos_steps(direction: &str, cfg: &serde_json::Value) -> Vec<f64> {
+        let measurer = DeterministicTextMeasurer::default();
+        let typography = typography_plan(cfg);
+        let layout = layout_gitgraph_diagram_typed(
+            &linear_commit_model(direction),
+            cfg,
+            &typography,
+            &measurer,
+        )
+        .unwrap();
+        let mut commits = layout.commits.iter().collect::<Vec<_>>();
+        commits.sort_by_key(|c| c.seq);
+        commits
+            .windows(2)
+            .map(|pair| (pair[1].pos - pair[0].pos).abs())
+            .collect()
+    }
+
+    #[test]
+    fn commit_spacing_defaults_to_mermaid_fixed_step() {
+        for direction in ["LR", "TB", "BT"] {
+            for parallel in [false, true] {
+                let cfg = json!({ "gitGraph": { "parallelCommits": parallel } });
+                assert_eq!(
+                    commit_pos_steps(direction, &cfg),
+                    vec![50.0; 3],
+                    "direction={direction} parallel={parallel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commit_spacing_sets_the_step_between_consecutive_commits() {
+        for direction in ["LR", "TB", "BT"] {
+            for parallel in [false, true] {
+                let cfg = json!({
+                    "gitGraph": { "commitSpacing": 120, "parallelCommits": parallel }
+                });
+                assert_eq!(
+                    commit_pos_steps(direction, &cfg),
+                    vec![120.0; 3],
+                    "direction={direction} parallel={parallel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn commit_spacing_keeps_the_first_commit_offset() {
+        let measurer = DeterministicTextMeasurer::default();
+        let cfg = json!({ "gitGraph": { "commitSpacing": 120 } });
+        let typography = typography_plan(&cfg);
+        let layout =
+            layout_gitgraph_diagram_typed(&linear_commit_model("LR"), &cfg, &typography, &measurer)
+                .unwrap();
+
+        assert_eq!(layout.commits[0].x, 10.0);
+        assert_eq!(layout.commits[1].x, 130.0);
+        assert_eq!(layout.max_pos, 480.0);
+    }
+
+    #[test]
+    fn commit_spacing_accepts_numeric_strings_and_ignores_invalid_values() {
+        let numeric_string = json!({ "gitGraph": { "commitSpacing": "80" } });
+        assert_eq!(commit_pos_steps("LR", &numeric_string), vec![80.0; 3]);
+
+        for invalid in [
+            json!(0),
+            json!(-20),
+            json!("wide"),
+            json!(null),
+            json!(true),
+        ] {
+            let cfg = json!({ "gitGraph": { "commitSpacing": invalid.clone() } });
+            assert_eq!(
+                commit_pos_steps("LR", &cfg),
+                vec![50.0; 3],
+                "commitSpacing={invalid}"
+            );
+        }
     }
 }
